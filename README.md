@@ -1,6 +1,6 @@
 # SearXNG Installation Guide for Ubuntu 24.04
 
-**Updated: November 1, 2025**
+**Updated: November 3, 2025**
 
 A comprehensive guide for installing SearXNG in a VM with Ubuntu 24.04 on a local LAN, updated for Python 3.12 compatibility.
 
@@ -200,128 +200,157 @@ sudo reboot
 
 ## Install Required Packages
 
-### 1. Navigate to /usr/local
+### 1. Install core tooling and build prerequisites
 
 ```bash
-cd /usr/local
+sudo apt install -y git bzip2 tar
+sudo apt install -y build-essential dkms linux-headers-$(uname -r)
 ```
 
-### 2. Install Git and Docker
+- `bzip2` and `tar` are required by the upstream Docker setup scripts.
+- `build-essential`, `dkms`, and the matching kernel headers satisfy installers that need to build kernel modules (e.g., hypervisor tools or GPU drivers).
+- If you later install a new kernel, rerun the headers command with the new version: `sudo apt install linux-headers-$(uname -r)`.
+
+### 2. Install Docker Engine & Docker Compose Plugin (official repository)
+
+Remove any legacy packages, add Docker's APT repository, then install:
 
 ```bash
-sudo apt install git
-sudo apt install docker.io
+sudo apt remove -y docker docker-engine docker.io containerd runc
+
+sudo apt update
+sudo apt install -y ca-certificates curl gnupg
+
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+  sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 ```
 
-> **Note**: Do NOT install the old `docker-compose` package - it's incompatible with Python 3.12.
-
-### 3. Clone SearXNG Repository
+Allow your user to run Docker without `sudo` (log out/in afterwards):
 
 ```bash
-sudo git clone https://github.com/searxng/searxng-docker.git
+sudo usermod -aG docker $USER
+newgrp docker
 ```
 
-### 4. Navigate to the Directory
+Verify the installation:
 
 ```bash
-cd searxng-docker
+docker --version
+docker compose version
 ```
 
-You should now be in: `/usr/local/searxng-docker/`
+### 3. Clone the SearXNG Docker project
+
+Clone into your home directory (adjust if you prefer another path):
+
+```bash
+cd ~
+git clone https://github.com/searxng/searxng-docker.git searxng
+cd ~/searxng
+```
 
 ---
 
 ## Configure SearXNG
 
-### 1. Edit the Environment File
+### 1. Prepare the environment file
 
-The `.env` file is hidden. Verify it exists:
-
-```bash
-ls -ah
-```
-
-Edit the file:
+SearXNG ships an example file. Copy it and then edit the values that matter for our LAN setup:
 
 ```bash
-sudo nano .env
+cp .env.example .env
+nano .env
 ```
 
-**Modify based on your chosen method:**
+Use the following baseline configuration (adjust hostname/IP to match your environment):
 
-#### Method 1: IP Address Only
-```
-SEARXNG_HOSTNAME=192.168.10.10
-# LETSENCRYPT_EMAIL=<email>
-```
-
-#### Method 2: Local Hostname (mDNS)
 ```
 SEARXNG_HOSTNAME=searxng.local
-# LETSENCRYPT_EMAIL=<email>
+SEARXNG_BASE_URL=https://searxng.local
+SEARXNG_PORT=8080
+SEARXNG_BIND_ADDRESS=0.0.0.0:8080
+REDIS_URL=redis://redis:6379/0
+LIMITER_ENABLED=false
+# LETSENCRYPT_EMAIL=<only set this if you have a public domain>
 ```
 
-#### Method 3: Public Domain with Let's Encrypt
-```
-SEARXNG_HOSTNAME=search.yourdomain.com
-LETSENCRYPT_EMAIL=your@email.com
-```
+- For **Method 1 (IP only)**, replace both occurrences of `searxng.local` with your static IP (e.g., `192.168.10.10`).
+- For **Method 3 (public domain)**, keep HTTPS and set `SEARXNG_HOSTNAME`/`SEARXNG_BASE_URL` to your FQDN, then populate `LETSENCRYPT_EMAIL`.
+- If you temporarily need HTTP everywhere, change `SEARXNG_BASE_URL` to `http://...`; once HTTPS works, switch it back to `https://` so generated links use TLS.
 
-#### Method 4: Dual HTTP/HTTPS
-```
-SEARXNG_HOSTNAME=searxng.local
-# LETSENCRYPT_EMAIL=<email>
-```
+Save and exit (Ctrl+X, Y, Enter).
 
-> **Note for Method 4**: You'll also need to edit the Caddyfile (see Dual HTTP/HTTPS Configuration section below).
+### 2. Set a unique secret key
 
-Replace the IP address or domain with your actual values.
-
-Save and exit (Ctrl+X, then Y, then Enter).
-
-> **Note**: Methods 1 and 2 use self-signed certificates (browser warning). Method 3 uses Let's Encrypt (trusted certificate, no warnings).
-
-### 2. Generate Secret Key
-
-While still in `/usr/local/searxng-docker/`, run:
+Generate a 64-character hex string and place it in `searxng/settings.yml`:
 
 ```bash
-sudo sed -i "s|ultrasecretkey|$(openssl rand -hex 32)|g" searxng/settings.yml
+python3 -c "import secrets; print(secrets.token_hex(32))"
+nano searxng/settings.yml
 ```
 
-This adds a randomly generated secret key to the `settings.yml` file in `/usr/local/searxng-docker/searxng/`.
+Update the `server` block:
+
+```yaml
+server:
+  secret_key: "<paste_your_random_hex_here>"
+  limiter: false
+  image_proxy: true
+```
+
+### 3. Enable the formats required by your software
+
+Still inside `searxng/settings.yml`, add a `search` section (or edit the existing one) so JSON requests are permitted alongside the HTML UI:
+
+```yaml
+search:
+  formats:
+    - html
+    - json
+    - rss
+    - text
+```
+
+This allows API calls such as `http://searxng.local:8888/search?q=test&format=json` without triggering 403 errors.
+
+### 4. Expose container port 8080 as host port 8888 (HTTP endpoint)
+
+Edit `docker-compose.yaml` so the `searxng` service publishes an additional host port. This keeps HTTPS on port 443 via Caddy while providing plain HTTP on port 8888:
+
+```bash
+nano docker-compose.yaml
+```
+
+Within the `services: searxng:` block, add (or extend) a `ports` section:
+
+```yaml
+  searxng:
+    ports:
+      - "8888:8080"
+```
+
+Leave existing volume and environment sections untouched. After saving, port 8888 on the VM will forward to the container’s internal port 8080, allowing legacy software to reach SearXNG over HTTP.
 
 ---
 
-## Install Docker Compose V2
+## Verify Docker & Compose
 
-Docker Compose V2 is compatible with Python 3.12. Install it using the direct binary method:
-
-### 1. Create the CLI Plugins Directory
+Because we installed Docker from the official repository, the Compose plugin is already in place. Double-check everything is working before moving on:
 
 ```bash
-sudo mkdir -p /usr/local/lib/docker/cli-plugins
-```
-
-### 2. Download Docker Compose V2
-
-```bash
-sudo curl -SL https://github.com/docker/compose/releases/download/v2.24.5/docker-compose-linux-x86_64 -o /usr/local/lib/docker/cli-plugins/docker-compose
-```
-
-### 3. Make it Executable
-
-```bash
-sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
-```
-
-### 4. Verify Installation
-
-```bash
+docker --version
 docker compose version
 ```
 
-You should see output like: `Docker Compose version v2.24.5`
+Both commands should return versions (e.g., `Docker version 27.x` and `Docker Compose version v2.x`). If Compose is missing, rerun the installation commands in the previous section.
 
 ---
 
@@ -333,62 +362,39 @@ You should see output like: `Docker Compose version v2.24.5`
 sudo reboot
 ```
 
-### 2. Start Docker Containers
+### 2. Start the stack
 
-Log back in and navigate to the directory:
-
-```bash
-cd /usr/local/searxng-docker
-```
-
-Start Docker in the background:
+After logging back in, move into the project directory and fetch the latest images:
 
 ```bash
-# NOTE: Use "docker compose" (with space) instead of "docker-compose" (with hyphen)
-# This is the new Docker Compose V2 syntax
-sudo docker compose up -d
+cd ~/searxng
+docker compose pull
+docker compose up -d
 ```
 
-### 3. Verify Containers are Running
+### 3. Verify containers are running
 
 ```bash
-sudo docker ps
+docker compose ps
 ```
 
-You should see the SearXNG containers running.
+You should see `caddy`, `redis`, and `searxng` listed with `State` set to `running` or `started`.
 
 ---
 
 ## Access SearXNG
 
-Open a web browser on any machine on your network and navigate to your SearXNG instance based on your chosen method:
+Once the stack is running, you can access it via the URLs below. Replace hostnames/IPs with the values you configured in `.env` and in your DNS/mDNS setup.
 
-### Method 1: IP Address
-```
-https://192.168.10.10
-```
-Replace with your VM's IP address.
+| Method | Browser URL (HTTPS) | Software/API URL (HTTP) |
+| --- | --- | --- |
+| 1. Static IP only | `https://192.168.10.10` | `http://192.168.10.10:8888` *(optional if you add the port mapping)* |
+| 2. Local hostname (mDNS) | `https://searxng.local` | `http://searxng.local:8888` |
+| 3. Public domain + Let's Encrypt | `https://search.yourdomain.com` | Usually not needed—software can also use HTTPS |
+| 4. Dual HTTP/HTTPS (this build) | `https://searxng.local` | `http://searxng.local:8888` |
 
-### Method 2: Local Hostname
-```
-https://searxng.local
-```
-
-### Method 3: Public Domain
-```
-https://search.yourdomain.com
-```
-
-### Method 4: Dual HTTP/HTTPS
-**Browser access (HTTPS)**:
-```
-https://searxng.local
-```
-
-**Software/API access (HTTP)**:
-```
-http://searxng.local:8888
-```
+- For Method 4 we explicitly expose container port 8080 as host port 8888 so legacy software can talk to SearXNG over HTTP while browsers use Caddy’s HTTPS frontend.
+- If you skip the extra port mapping, remove the software/API URL column entries for your method.
 
 ---
 
