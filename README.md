@@ -65,6 +65,71 @@ Before starting, decide which setup method you want:
 
 ---
 
+## Automated Setup (Recommended)
+
+We now provide an automation script that performs the entire installation for you, including:
+
+- Netplan static IP configuration (NetworkManager-aware)
+- Docker Engine + Compose plugin installation
+- SearXNG container deployment
+- Optional mDNS/Avahi hostname setup and service advertisements
+- Dual HTTP/HTTPS configuration (for Method 4)
+
+### 1. Transfer the script to your VM
+
+From the machine that holds this repository, copy `searxng-setup.sh` to your Ubuntu VM (replace `user@vm-ip` with your username/IP):
+
+```bash
+scp searxng-setup.sh user@vm-ip:~/
+```
+
+Or download it directly on the VM if you host it elsewhere:
+
+```bash
+curl -O https://<your-host>/searxng-setup.sh
+```
+
+### 2. Run the script
+
+```bash
+chmod +x ~/searxng-setup.sh
+sudo ~/searxng-setup.sh
+```
+
+The script will:
+
+1. Verify prerequisites and internet connectivity
+2. Offer to configure a static IP (with optional scanning & validation)
+3. Prompt for your installation method:
+   - **1 – Static IP only** (HTTPS on the IP, optional HTTP if you keep port 8888 mapping)
+   - **2 – Local hostname (mDNS)**
+   - **3 – Public domain with Let's Encrypt**
+   - **4 – Dual HTTP/HTTPS (HTTPS + HTTP port 8888)**
+4. Install required Ubuntu packages, Docker CE & Compose V2
+5. Deploy SearXNG with your chosen configuration
+6. Advertise mDNS services (Methods 2 & 4) so other devices discover the instance automatically
+7. Print a summary with URLs and management commands
+
+> The script writes a detailed log to `/tmp/searxng-setup-YYYYMMDD-HHMMSS.log`. If anything fails, reference that log first.
+
+### 3. Post-install verification
+
+After the script finishes, confirm you can reach the instance:
+
+```bash
+curl -k https://<hostname-or-ip>
+curl    http://<hostname-or-ip>:8888/search?q=test
+```
+
+If both commands return HTML, the deployment is ready. Use the "Access SearXNG" table below for the exact URLs per method.
+
+### 4. Re-running the script
+
+- Running the script again is idempotent: existing configs are updated, dependencies verified, and containers recreated as needed.
+- To switch methods, rerun the script and choose a different option—it automatically updates the `.env`, `settings.yml`, `docker-compose.yaml`, and Caddy configuration.
+
+---
+
 ## Initial Setup
 
 ### 1. Create the VM
@@ -491,6 +556,8 @@ This configuration allows simultaneous access via:
 
 - Method 2 setup complete (hostname and mDNS configured)
 - `.env` file configured with `SEARXNG_HOSTNAME=searxng.local`
+
+> **Already using the automation script?** Method 4 is provisioned automatically—this section is kept for manual installs and future reference.
 
 #### Configuration Steps
 
